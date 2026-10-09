@@ -1,0 +1,90 @@
+name: Release
+
+# Push a tag like v0.3.0 to build and publish a release.
+# Everything in the zip is either built here from this commit or downloaded
+# from the official WinDivert release and checked against a pinned SHA-256.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  WINDIVERT_VERSION: "2.2.2"
+  WINDIVERT_ZIP_SHA256: "63cb41763bb4b20f600b6de04e991a9c2be73279e317d4d82f237b150c5f3f15"
+  WINDIVERT_DLL_SHA256: "c1e060ee19444a259b2162f8af0f3fe8c4428a1c6f694dce20de194ac8d7d9a2"
+  WINDIVERT_SYS_SHA256: "8da085332782708d8767bcace5327a6ec7283c17cfb85e40b03cd2323a90ddc2"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test -count=1 ./...
+
+      - name: Check tag matches version in code
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          have=$(sed -n 's/^const version = "\(.*\)"/\1/p' engine_windows.go)
+          if [ "$want" != "$have" ]; then
+            echo "Tag $GITHUB_REF_NAME but engine_windows.go has version $have"; exit 1
+          fi
+
+      - name: Build
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist/dpisplit
+          go build -trimpath -ldflags "-s -w -H=windowsgui" -o dist/dpisplit/dpisplit.exe .
+          go build -tags cli -trimpath -ldflags "-s -w" -o dist/dpisplit/dpisplit-cli.exe .
+
+      - name: Fetch and verify WinDivert
+        run: |
+          zip="WinDivert-${WINDIVERT_VERSION}-A.zip"
+          curl -fsSL -o "$zip" "https://github.com/basil00/WinDivert/releases/download/v${WINDIVERT_VERSION}/$zip"
+          echo "${WINDIVERT_ZIP_SHA256}  $zip" | sha256sum -c -
+          unzip -q "$zip" -d windivert
+          d="windivert/WinDivert-${WINDIVERT_VERSION}-A"
+          echo "${WINDIVERT_DLL_SHA256}  $d/x64/WinDivert.dll"   | sha256sum -c -
+          echo "${WINDIVERT_SYS_SHA256}  $d/x64/WinDivert64.sys" | sha256sum -c -
+          cp "$d/x64/WinDivert.dll" "$d/x64/WinDivert64.sys" dist/dpisplit/
+          cp "$d/LICENSE" dist/dpisplit/WinDivert-LICENSE.txt
+
+      - name: Package
+        run: |
+          cp README.md LICENSE THIRD_PARTY_NOTICES.md dist/dpisplit/
+          cd dist
+          name="dpisplit-${GITHUB_REF_NAME}-windows-x64.zip"
+          zip -qr "$name" dpisplit
+          (cd dpisplit && sha256sum dpisplit.exe dpisplit-cli.exe WinDivert.dll WinDivert64.sys) > SHA256SUMS.txt
+          sha256sum "$name" >> SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "Built by GitHub Actions from commit ${GITHUB_SHA} ([build log](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}))."
+            echo
+            echo "**Download** \`dpisplit-${GITHUB_REF_NAME}-windows-x64.zip\`, unblock it (right-click → Properties → Unblock), extract, run \`dpisplit.exe\`."
+            echo
+            echo "Antivirus / VirusTotal warnings are about the bundled WinDivert driver; see [the README](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}#why-do-antivirus-tools-flag-it)."
+            echo
+            echo '```'
+            cat dist/SHA256SUMS.txt
+            echo '```'
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/dpisplit-${GITHUB_REF_NAME}-windows-x64.zip" dist/SHA256SUMS.txt \
+            --title "dpisplit ${GITHUB_REF_NAME}" --notes-file notes.md

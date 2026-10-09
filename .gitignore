@@ -1,0 +1,10 @@
+# build output
+*.exe
+dist/
+windivert/
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
